@@ -248,7 +248,7 @@ async def crawl_website_single_site(
                 async with semaphore:
                     async with AsyncWebCrawler(verbose=False) as crawler:
                         result = await crawler.arun(url=current_url, config=config)
-                    await asyncio.sleep(0.5)  # Manual delay to mimic RateLimiter
+                    await asyncio.sleep(3)  # Manual delay to mimic RateLimiter
 
                 if result.success:
                     cleaned_markdown = clean_markdown(result.markdown.raw_markdown)
@@ -328,7 +328,7 @@ def run_crawl_in_thread(start_url: str, output_dir: str, max_concurrency: int, m
 async def crawl_csv_upload_endpoint(
     csv_file: UploadFile = File(...),
     output_dir: str = Form("./crawl_output_csv"),
-    max_concurrency_per_site: int = Form(default=20, ge=1),
+    max_concurrency_per_site: int = Form(default=10, ge=1),
     max_depth: int = Form(default=2, ge=0),
     max_threads: int = Form(default=50, ge=1)
 ):
