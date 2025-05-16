@@ -7,8 +7,6 @@ import re
 from urllib.parse import urljoin, urlparse
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
-from crawl4ai.dispatchers import SemaphoreDispatcher
-from crawl4ai.rate_limiter import RateLimiter
 from typing import List, Dict, Any, Tuple
 import csv
 import io
@@ -17,7 +15,7 @@ import uvicorn
 import logging
 from datetime import datetime
 
-# Configuration du logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -142,6 +140,7 @@ async def crawl_website_single_site(
     crawled_urls = set()
     queued_urls = set()
     crawl_queue: asyncio.Queue[CrawlQueueItem] = asyncio.Queue()
+    semaphore = asyncio.Semaphore(max_concurrency)  # Limit concurrency per site
     results = {"success": [], "failed": [], "skipped_by_filter": [], "initial_url": start_url}
 
     try:
@@ -189,11 +188,7 @@ async def crawl_website_single_site(
         markdown_generator=md_generator,
         cache_mode="BYPASS",
         exclude_social_media_links=True,
-        check_robots_txt=True,
-        dispatcher=SemaphoreDispatcher(
-            semaphore_count=max_concurrency,
-            rate_limiter=RateLimiter(base_delay=(0.5, 1.0), max_delay=10.0)
-        )
+        check_robots_txt=True
     )
 
     async def crawl_page():
@@ -229,28 +224,31 @@ async def crawl_website_single_site(
                     logger.info(f"Skipping save for {current_url} due to filename filter: {filename}")
                     results["skipped_by_filter"].append(current_url)
                     if current_depth < max_depth:
-                        async with AsyncWebCrawler(verbose=False) as crawler:
-                            result = await crawler.arun(url=current_url, config=config)
-                            if result.success:
-                                internal_links = result.links.get("internal", [])
-                                for link in internal_links:
-                                    href = link["href"]
-                                    try:
-                                        absolute_url = urljoin(current_url, href)
-                                        parsed_absolute_url = urlparse(absolute_url)
-                                        if parsed_absolute_url.netloc == crawl_start_domain:
-                                            if absolute_url not in crawled_urls and absolute_url not in queued_urls:
-                                                crawl_queue.put_nowait((absolute_url, current_depth + 1, crawl_start_domain, current_site_output_path))
-                                                queued_urls.add(absolute_url)
-                                    except Exception as link_e:
-                                        logger.error(f"Error processing link {href} from {current_url}: {link_e}")
-                            else:
-                                logger.error(f"Failed to get links from {current_url} (skipped save): {result.error_message}")
+                        async with semaphore:
+                            async with AsyncWebCrawler(verbose=False) as crawler:
+                                result = await crawler.arun(url=current_url, config=config)
+                                if result.success:
+                                    internal_links = result.links.get("internal", [])
+                                    for link in internal_links:
+                                        href = link["href"]
+                                        try:
+                                            absolute_url = urljoin(current_url, href)
+                                            parsed_absolute_url = urlparse(absolute_url)
+                                            if parsed_absolute_url.netloc == crawl_start_domain:
+                                                if absolute_url not in crawled_urls and absolute_url not in queued_urls:
+                                                    crawl_queue.put_nowait((absolute_url, current_depth + 1, crawl_start_domain, current_site_output_path))
+                                                    queued_urls.add(absolute_url)
+                                        except Exception as link_e:
+                                            logger.error(f"Error processing link {href} from {current_url}: {link_e}")
+                                else:
+                                    logger.error(f"Failed to get links from {current_url} (skipped save): {result.error_message}")
                     crawl_queue.task_done()
                     continue
 
-                async with AsyncWebCrawler(verbose=False) as crawler:
-                    result = await crawler.arun(url=current_url, config=config)
+                async with semaphore:
+                    async with AsyncWebCrawler(verbose=False) as crawler:
+                        result = await crawler.arun(url=current_url, config=config)
+                    await asyncio.sleep(0.5)  # Manual delay to mimic RateLimiter
 
                 if result.success:
                     cleaned_markdown = clean_markdown(result.markdown.raw_markdown)
@@ -357,7 +355,7 @@ async def crawl_csv_upload_endpoint(
             "site_crawl_results": {}
         }
 
-        # Charger l'état des progrès précédents pour éviter de recrawler les sites terminés
+        # Load previous progress to avoid re-crawling completed sites
         progress_files = [f for f in os.listdir(output_dir) if f.startswith("progress_") and f.endswith(".json")]
         completed_urls = set()
         for pf in progress_files:
@@ -369,9 +367,9 @@ async def crawl_csv_upload_endpoint(
         urls_to_crawl = [url for url in urls_to_crawl if url not in completed_urls]
         logger.info(f"Found {len(completed_urls)} completed URLs, {len(urls_to_crawl)} URLs remaining to crawl")
 
-        # Utiliser ThreadPoolExecutor pour crawler les sites en parallèle
+        # Use ThreadPoolExecutor to crawl sites in parallel
         with ThreadPoolExecutor(max_workers=max_threads) as executor:
-            # Soumettre chaque site à un thread
+            # Submit each site to a thread
             futures = [
                 executor.submit(
                     run_crawl_in_thread,
@@ -382,7 +380,7 @@ async def crawl_csv_upload_endpoint(
                 ) for url in urls_to_crawl
             ]
 
-            # Collecter les résultats
+            # Collect results
             for future, url in zip(futures, urls_to_crawl):
                 try:
                     result = future.result()
