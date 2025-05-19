@@ -522,7 +522,6 @@ async def crawl_from_csv(csv_path: str, output_dir: str, max_concurrency: int, m
     except Exception as e:
         logger.error(f"Critical error in crawl_from_csv: {e}")
         return {"status": "error", "message": str(e)}
-
 @app.post("/crawl_csv_upload")
 async def crawl_csv_upload_endpoint(
     csv_file: UploadFile = File(...),
@@ -536,20 +535,96 @@ async def crawl_csv_upload_endpoint(
         raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
 
     try:
-        csv_content = await csv_file.read()
-        csv_content = csv_content.decode("utf-8")
-        result = await crawl_from_csv(
-            csv_content=csv_content,
-            output_dir=output_dir,
-            max_concurrency=max_concurrency_per_site,
-            max_depth=max_depth,
-            max_threads=max_threads
-        )
-        return result
+        csv_content_bytes = await csv_file.read()
+        csv_content = csv_content_bytes.decode("utf-8")
+        urls_to_crawl = read_urls_from_csv(csv_content)
+
+        output_dir = os.path.abspath(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Collect all previously crawled URLs
+        global_crawled_urls = set()
+        progress_files = [f for f in os.listdir(output_dir) if f.startswith("progress_") and f.endswith(".json")]
+        for pf in progress_files:
+            try:
+                with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
+                    progress = json.load(f)
+                    crawled = progress.get("crawled_urls", [])
+                    global_crawled_urls.update(crawled)
+            except Exception as e:
+                logger.error(f"Error reading progress file {pf}: {e}")
+
+        # Skip completed sites
+        completed_urls = set()
+        for pf in progress_files:
+            try:
+                with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
+                    progress = json.load(f)
+                    results = progress.get("results", {})
+                    if results.get("success") and not results.get("failed") and not results.get("skipped_by_filter"):
+                        completed_urls.add(results.get("initial_url", ""))
+            except Exception as e:
+                logger.error(f"Error reading progress file {pf}: {e}")
+
+        urls_to_crawl = [url for url in urls_to_crawl if url not in completed_urls]
+        logger.info(f"Found {len(completed_urls)} completed URLs, {len(urls_to_crawl)} URLs remaining to crawl from upload")
+
+        overall_results: Dict[str, Any] = {
+            "status": "processing",
+            "total_urls_from_csv": len(urls_to_crawl),
+            "site_crawl_results": {}
+        }
+
+        # Crawl sites in parallel
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = [
+                executor.submit(
+                    run_crawl_in_thread,
+                    url,
+                    output_dir,
+                    max_concurrency_per_site,
+                    max_depth,
+                    global_crawled_urls
+                ) for url in urls_to_crawl
+            ]
+
+            for future, url in zip(futures, urls_to_crawl):
+                try:
+                    result = future.result()
+                    overall_results["site_crawl_results"][url] = result
+                except Exception as e:
+                    logger.error(f"Error crawling {url}: {e}")
+                    overall_results["site_crawl_results"][url] = {
+                        "status": "error",
+                        "initial_url": url,
+                        "error": str(e)
+                    }
+
+        # Save overall metadata
+        metadata_path = os.path.join(output_dir, "overall_metadata_upload.json") # Separate metadata for uploads
+        try:
+            serializable_results = overall_results.copy()
+            for url, res in serializable_results["site_crawl_results"].items():
+                if "success" in res and isinstance(res["success"], set):
+                    res["success"] = list(res["success"])
+                if "skipped_by_filter" in res and isinstance(res["skipped_by_filter"], set):
+                    res["skipped_by_filter"] = list(res["skipped_by_filter"])
+
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(serializable_results, f, indent=2)
+            overall_results["metadata_path"] = metadata_path
+            logger.info(f"Overall metadata for upload saved to {metadata_path}")
+        except Exception as e:
+            logger.error(f"Error saving overall metadata for upload: {e}")
+            overall_results["metadata_save_error"] = str(e)
+
+        overall_results["status"] = "completed"
+        logger.info("Overall CSV upload processing completed")
+        return overall_results
     except Exception as e:
         logger.error(f"Critical error in crawl_csv_upload_endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
-
+    
 def run_daemon():
     """Daemon mode to run daily crawls at midnight."""
     csv_path = "C:/Users/victo/Desktop/multithreads_crawling/urls.csv"  # Adjust path
