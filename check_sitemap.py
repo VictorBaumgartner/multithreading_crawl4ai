@@ -93,6 +93,8 @@ async def fetch_and_parse_sitemap_content(sitemap_url: str, depth: int = 0) -> L
     """
     print(f"Crawl4AI: Attempting to fetch content for sitemap: {sitemap_url}")
     content = None
+    response_content_type = None # To store the Content-Type header
+
     try:
         async with AsyncWebCrawler() as crawler:
             response = await crawler.arun(
@@ -100,15 +102,16 @@ async def fetch_and_parse_sitemap_content(sitemap_url: str, depth: int = 0) -> L
                 **CRAWL4AI_DEFAULT_CONFIG, # Pass config dict
             )
 
-            if response.success and response.html: # Crawl4AI typically puts content into .html
-                content = response.html.encode('utf-8') # Convert to bytes for gzip/ElementTree
+            if response.success:
+                # Get Content-Type header from response
+                response_content_type = response.headers.get('Content-Type', '').lower()
 
-            elif response.success and response.markdown: # In case it was interpreted as text/markdown
-                content = response.markdown.encode('utf-8')
-
-            elif response.raw_content: # Fallback to raw_content if available
-                content = response.raw_content
-
+                if response.html: # Crawl4AI typically puts content into .html if it detects HTML
+                    content = response.html.encode('utf-8')
+                elif response.markdown: # In case it was interpreted as text/markdown
+                    content = response.markdown.encode('utf-8')
+                elif response.raw_content: # Fallback to raw_content if available
+                    content = response.raw_content
             else:
                 print(f"Crawl4AI: Failed to fetch content for {sitemap_url}: {response.error_message or 'No content or error'}")
                 return []
@@ -118,26 +121,35 @@ async def fetch_and_parse_sitemap_content(sitemap_url: str, depth: int = 0) -> L
         return []
 
     if not content:
+        print(f"Crawl4AI: No content received for {sitemap_url}")
         return []
 
-    try:
-        # Try decompressing if it's gzipped or looks like gzip
-        # Crawl4AI might decompress automatically, but this is a safeguard
-        if sitemap_url.endswith(".gz") or sitemap_url.endswith(".xml.gz"):
-            try:
+    # --- NEW LOGIC FOR CONTENT TYPE HANDLING ---
+    # Heuristics for content type based on headers and content itself
+
+    # Check if content type is clearly HTML
+    if 'text/html' in response_content_type or content.strip().startswith(b'<!DOCTYPE html>') or content.strip().startswith(b'<html'):
+        print(f"Crawl4AI: Received HTML content for {sitemap_url}, not an XML sitemap. Skipping parsing.")
+        return []
+
+    # Check for gzip signature if it's a .gz URL or header suggests it
+    if sitemap_url.endswith(".gz") or sitemap_url.endswith(".xml.gz") or 'application/x-gzip' in response_content_type or 'application/gzip' in response_content_type:
+        try:
+            # Check for gzip magic number (first two bytes: 0x1f 0x8b)
+            if content.startswith(b'\x1f\x8b'):
                 decompressed_content = gzip.decompress(content)
+                print(f"Successfully decompressed gzipped content for {sitemap_url}.")
                 return await parse_xml_content_for_sitemap_entries(decompressed_content, sitemap_url, depth)
-            except OSError as e:
-                print(f"Failed to decompress gzipped content for {sitemap_url}: {e}. Trying as plain XML.")
-                # If decompression fails, try parsing as raw XML
-                pass
+            else:
+                print(f"Content for {sitemap_url} (expected gzip) does not start with gzip signature. Trying as plain XML.")
+        except OSError as e:
+            print(f"Failed to decompress gzipped content for {sitemap_url}: {e}. Trying as plain XML.")
+        except Exception as e:
+            print(f"An error occurred during gzip decompression for {sitemap_url}: {e}. Trying as plain XML.")
 
-        # Always try parsing as XML
-        return await parse_xml_content_for_sitemap_entries(content, sitemap_url, depth)
-
-    except Exception as e:
-        print(f"Error processing sitemap {sitemap_url}: {e}")
-        return []
+    # Fallback: Always try parsing as plain XML
+    print(f"Attempting to parse {sitemap_url} as plain XML.")
+    return await parse_xml_content_for_sitemap_entries(content, sitemap_url, depth)
 
 
 async def get_sitemaps_from_robots_txt_crawl4ai(domain_url: str) -> List[str]:
@@ -182,9 +194,11 @@ async def find_and_parse_sitemaps_crawl4ai(domain_url: str) -> List[dict]:
         f"{domain_url.rstrip('/')}/sitemap_index.xml.gz",
     ]
 
+    # New: Add the sitemap URL from robots.txt only if found
     robots_sitemaps = await get_sitemaps_from_robots_txt_crawl4ai(domain_url)
     potential_sitemap_urls.extend(robots_sitemaps)
 
+    # Remove duplicates from the list of potential sitemap URLs
     potential_sitemap_urls = list(set(potential_sitemap_urls))
 
     tasks = [fetch_and_parse_sitemap_content(url) for url in potential_sitemap_urls]
