@@ -344,7 +344,7 @@ async def crawl_website_single_site(
                     await asyncio.sleep(1.0)
 
                 if result.success:
-                    cleaned_markdown = clean_markdown(result.markdown.raw_markdown)
+                    cleaned_markdown = clean_markdown(result.markdown.markdown.get("raw_markdown", ""))
                     if not cleaned_markdown.strip():
                         logger.warning(f"No content to save for {current_url}")
                         results["failed"].append({"url": current_url, "error": "Empty Markdown content"})
