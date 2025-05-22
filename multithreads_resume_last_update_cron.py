@@ -385,8 +385,8 @@ async def crawl_website_single_site(
                 logger.error(f"Error in crawl_page worker: {e}")
                 crawl_queue.task_done()
 
-        # Save progress
-        progress_path = os.path.join(output_dir, f"progress_{sanitize_dirname(start_url)}.json")
+        # Save progress inside the site's own folder with the site name as filename
+        progress_path = os.path.join(site_output_path, f"{sanitize_dirname(start_url)}.json")
         with open(progress_path, "w", encoding="utf-8") as f:
             json.dump({"crawled_urls": list(crawled_urls), "results": results}, f, indent=2)
         logger.info(f"Progress saved for {start_url} to {progress_path}")
@@ -429,6 +429,21 @@ def run_crawl_in_thread(start_url: str, output_dir: str, max_concurrency: int, m
     finally:
         loop.close()
 
+def find_progress_files(output_dir: str) -> List[str]:
+    """Find all progress JSON files in site subdirectories."""
+    progress_files = []
+    try:
+        for item in os.listdir(output_dir):
+            item_path = os.path.join(output_dir, item)
+            if os.path.isdir(item_path):
+                # Look for JSON files inside each site directory
+                for file in os.listdir(item_path):
+                    if file.endswith(".json"):
+                        progress_files.append(os.path.join(item_path, file))
+    except Exception as e:
+        logger.error(f"Error finding progress files: {e}")
+    return progress_files
+
 async def crawl_from_csv(csv_path: str, output_dir: str, max_concurrency: int, max_depth: int, max_threads: int):
     """Crawls URLs from a CSV file, used by daemon or cron."""
     try:
@@ -443,12 +458,12 @@ async def crawl_from_csv(csv_path: str, output_dir: str, max_concurrency: int, m
         output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Collect all previously crawled URLs
+        # Collect all previously crawled URLs from progress files in site directories
         global_crawled_urls = set()
-        progress_files = [f for f in os.listdir(output_dir) if f.startswith("progress_") and f.endswith(".json")]
+        progress_files = find_progress_files(output_dir)
         for pf in progress_files:
             try:
-                with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
+                with open(pf, "r", encoding="utf-8") as f:
                     progress = json.load(f)
                     crawled = progress.get("crawled_urls", [])
                     global_crawled_urls.update(crawled)
@@ -458,11 +473,14 @@ async def crawl_from_csv(csv_path: str, output_dir: str, max_concurrency: int, m
         # Skip completed sites
         completed_urls = set()
         for pf in progress_files:
-            with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
-                progress = json.load(f)
-                results = progress.get("results", {})
-                if results.get("success") and not results.get("failed") and not results.get("skipped_by_filter"):
-                    completed_urls.add(results.get("initial_url", ""))
+            try:
+                with open(pf, "r", encoding="utf-8") as f:
+                    progress = json.load(f)
+                    results = progress.get("results", {})
+                    if results.get("success") and not results.get("failed") and not results.get("skipped_by_filter"):
+                        completed_urls.add(results.get("initial_url", ""))
+            except Exception as e:
+                logger.error(f"Error reading progress file {pf}: {e}")
 
         urls_to_crawl = [url for url in urls_to_crawl if url not in completed_urls]
         logger.info(f"Found {len(completed_urls)} completed URLs, {len(urls_to_crawl)} URLs remaining to crawl")
@@ -522,6 +540,7 @@ async def crawl_from_csv(csv_path: str, output_dir: str, max_concurrency: int, m
     except Exception as e:
         logger.error(f"Critical error in crawl_from_csv: {e}")
         return {"status": "error", "message": str(e)}
+
 @app.post("/crawl_csv_upload")
 async def crawl_csv_upload_endpoint(
     csv_file: UploadFile = File(...),
@@ -542,12 +561,12 @@ async def crawl_csv_upload_endpoint(
         output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-        # Collect all previously crawled URLs
+        # Collect all previously crawled URLs from progress files in site directories
         global_crawled_urls = set()
-        progress_files = [f for f in os.listdir(output_dir) if f.startswith("progress_") and f.endswith(".json")]
+        progress_files = find_progress_files(output_dir)
         for pf in progress_files:
             try:
-                with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
+                with open(pf, "r", encoding="utf-8") as f:
                     progress = json.load(f)
                     crawled = progress.get("crawled_urls", [])
                     global_crawled_urls.update(crawled)
@@ -558,7 +577,7 @@ async def crawl_csv_upload_endpoint(
         completed_urls = set()
         for pf in progress_files:
             try:
-                with open(os.path.join(output_dir, pf), "r", encoding="utf-8") as f:
+                with open(pf, "r", encoding="utf-8") as f:
                     progress = json.load(f)
                     results = progress.get("results", {})
                     if results.get("success") and not results.get("failed") and not results.get("skipped_by_filter"):
@@ -601,6 +620,7 @@ async def crawl_csv_upload_endpoint(
                     }
 
         # Save overall metadata
+        # Save overall metadata
         metadata_path = os.path.join(output_dir, "overall_metadata_upload.json") # Separate metadata for uploads
         try:
             serializable_results = overall_results.copy()
@@ -629,9 +649,9 @@ def run_daemon():
     """Daemon mode to run daily crawls at midnight."""
     csv_path = "C:/Users/victo/Desktop/multithreads_crawling/urls.csv"  # Adjust path
     output_dir = "C:/Users/victo/Desktop/multithreads_crawling/crawl_output_csv"
-    max_concurrency = 5
+    max_concurrency = 20
     max_depth = 2
-    max_threads = 10
+    max_threads = 80
 
     async def daily_crawl():
         logger.info("Starting daily crawl")
