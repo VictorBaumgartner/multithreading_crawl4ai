@@ -103,12 +103,10 @@ async def fetch_and_parse_sitemap_content(sitemap_url: str, depth: int = 0) -> L
                 print(f"No content received for {sitemap_url}")
                 return []
 
-        # Handle different content types
         if 'text/html' in content_type or content.strip().startswith(b'<!DOCTYPE html>') or content.strip().startswith(b'<html'):
             print(f"Received HTML content for {sitemap_url}, not an XML sitemap")
             return []
 
-        # Handle gzip compression
         if (sitemap_url.endswith(('.gz', '.xml.gz')) or 
             'application/x-gzip' in content_type or 
             'application/gzip' in content_type or 
@@ -127,13 +125,29 @@ async def fetch_and_parse_sitemap_content(sitemap_url: str, depth: int = 0) -> L
         return []
 
 async def get_sitemaps_from_robots_txt_crawl4ai(domain_url: str) -> List[str]:
-    """Extracts sitemap URLs from robots.txt."""
-    robots_urls = [
-        f"{domain_url.rstrip('/')}/robots.txt",
-        f"{domain_url.rstrip('/')}/robot.txt"  # Some sites use non-standard names
+    """Extracts sitemap URLs from robots.txt in various possible locations."""
+    # Common subdirectories to check for robots.txt
+    common_subdirs = [
+        '',  # Root robots.txt
+        'collection/',
+        'en/',
+        'fr/',
+        'www/',
+        'site/',
+        'content/',
+        'web/',
+        'public/',
     ]
-    sitemap_urls = []
 
+    robots_urls = [
+        f"{domain_url.rstrip('/')}/{subdir}robots.txt"
+        for subdir in common_subdirs
+    ] + [
+        f"{domain_url.rstrip('/')}/{subdir}robot.txt"  # Non-standard naming
+        for subdir in common_subdirs
+    ]
+
+    sitemap_urls = []
     for robots_url in robots_urls:
         print(f"Checking robots.txt: {robots_url}")
         try:
@@ -152,7 +166,7 @@ async def get_sitemaps_from_robots_txt_crawl4ai(domain_url: str) -> List[str]:
                             if await is_valid_url(sitemap_url):
                                 sitemap_urls.append(sitemap_url)
                             else:
-                                print(f"Invalid sitemap URL found in robots.txt: {sitemap_url}")
+                                print(f"Invalid sitemap URL found in {robots_url}: {sitemap_url}")
                 else:
                     print(f"No content in robots.txt for {robots_url}")
         except Exception as e:
@@ -174,9 +188,12 @@ async def find_and_parse_sitemaps_crawl4ai(domain_url: str) -> List[dict]:
         f"{domain_url.rstrip('/')}/sitemap/sitemap_index.xml",
         f"{domain_url.rstrip('/')}/sitemap.php",
         f"{domain_url.rstrip('/')}/sitemap.txt",
+        f"{domain_url.rstrip('/')}/collection/sitemap.xml",
+        f"{domain_url.rstrip('/')}/en/sitemap.xml",
+        f"{domain_url.rstrip('/')}/fr/sitemap.xml",
     ]
 
-    # Add sitemaps from robots.txt
+    # Add sitemaps from all possible robots.txt files
     robots_sitemaps = await get_sitemaps_from_robots_txt_crawl4ai(domain_url)
     potential_sitemap_urls.extend(robots_sitemaps)
 
