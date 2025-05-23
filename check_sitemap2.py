@@ -1,44 +1,50 @@
+from fastapi import FastAPI, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Optional
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
+import uvicorn
 import csv
+import io
 
-def get_sitemap_info(url):
-    """
-    Fetches a sitemap URL and recursively retrieves all sub-sitemaps if it's a sitemap index.
-    Returns a list of tuples (sitemap_url, last_modified_datetime).
-    """
+app = FastAPI()
+
+class URLInfo(BaseModel):
+    input_url: str
+    url: str
+    last_modified: Optional[str] = None
+
+def get_sitemap_urls(url):
     try:
         request = urllib.request.Request(url, method='GET')
         with urllib.request.urlopen(request) as response:
-            last_modified_str = response.getheader('Last-Modified')
-            last_modified = parsedate_to_datetime(last_modified_str) if last_modified_str else None
             content = response.read().decode('utf-8')
             root = ET.fromstring(content)
+            ns = root.tag.split('}', 1)[0] + '}' if '}' in root.tag else ''
             root_tag_local = root.tag.split('}')[-1] if '}' in root.tag else root.tag
             result = []
-            if root_tag_local in ['sitemapindex', 'urlset']:
-                result.append((url, last_modified))
-                if root_tag_local == 'sitemapindex':
-                    ns = root.tag.split('}', 1)[0] + '}' if '}' in root.tag else ''
-                    sitemap_tag = ns + 'sitemap' if ns else 'sitemap'
-                    loc_tag = ns + 'loc' if ns else 'loc'
-                    for child in root.findall(sitemap_tag):
-                        loc_elem = child.find(loc_tag)
-                        if loc_elem is not None:
-                            loc = loc_elem.text
-                            result.extend(get_sitemap_info(loc))
+            loc_tag = ns + 'loc' if ns else 'loc'
+            lastmod_tag = ns + 'lastmod' if ns else 'lastmod'
+            if root_tag_local == 'sitemapindex':
+                sitemap_tag = ns + 'sitemap' if ns else 'sitemap'
+                for child in root.findall(sitemap_tag):
+                    loc_elem = child.find(loc_tag)
+                    if loc_elem is not None:
+                        result.extend(get_sitemap_urls(loc_elem.text))
+            elif root_tag_local == 'urlset':
+                for url_elem in root.findall(ns + 'url' if ns else 'url'):
+                    loc_elem = url_elem.find(loc_tag)
+                    lastmod_elem = url_elem.find(lastmod_tag)
+                    if loc_elem is not None:
+                        lastmod = lastmod_elem.text if lastmod_elem is not None else None
+                        result.append((loc_elem.text, lastmod))
             return result
     except Exception as e:
-        print(f"Error processing {url}: {e}")
+        print(f"Error processing sitemap {url}: {e}")
         return []
 
 def get_all_sitemaps(base_url):
-    """
-    Retrieves all sitemaps for a given website by checking robots.txt or default locations.
-    Returns a list of tuples (sitemap_url, last_modified_datetime).
-    """
     parsed = urllib.parse.urlparse(base_url)
     scheme = parsed.scheme
     netloc = parsed.netloc
@@ -48,10 +54,8 @@ def get_all_sitemaps(base_url):
             robots_content = response.read().decode('utf-8')
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            default_sitemap = f"{scheme}://{netloc}/sitemap.xml"
-            return get_sitemap_info(default_sitemap)
-        else:
-            return []
+            return get_sitemap_urls(f"{scheme}://{netloc}/sitemap.xml")
+        return []
     except Exception as e:
         print(f"Error fetching robots.txt for {base_url}: {e}")
         return []
@@ -63,26 +67,38 @@ def get_all_sitemaps(base_url):
             sitemap_abs = urllib.parse.urljoin(f"{scheme}://{netloc}/", sitemap_rel)
             sitemaps.append(sitemap_abs)
     
-    all_sitemaps_info = []
+    all_urls = []
     for sm in sitemaps:
-        all_sitemaps_info.extend(get_sitemap_info(sm))
-    return all_sitemaps_info
+        all_urls.extend(get_sitemap_urls(sm))
+    return all_urls
 
-def main(input_file='input.csv', output_file='output.csv'):
-    with open(input_file, 'r') as f_in, open(output_file, 'w', newline='') as f_out:
-        reader = csv.DictReader(f_in)
-        writer = csv.writer(f_out)
-        writer.writerow(['input_url', 'sitemap_url', 'last_modified'])
-        
-        for row in reader:
-            input_url = row['url']
-            all_sms = get_all_sitemaps(input_url)
-            if all_sms:
-                for sm_url, lm in all_sms:
-                    lm_str = lm.isoformat() if lm else ''
-                    writer.writerow([input_url, sm_url, lm_str])
-            else:
-                writer.writerow([input_url, '', ''])
+@app.post("/sitemaps/csv", response_model=dict)
+async def get_sitemap_data_from_csv(file: UploadFile = File(...)):
+    contents = await file.read()
+    csv_text = contents.decode('utf-8')
+    reader = csv.DictReader(io.StringIO(csv_text))
+    results = []
+
+    for row in reader:
+        input_url = row.get("url")
+        if not input_url:
+            continue
+        all_urls = get_all_sitemaps(input_url)
+        if all_urls:
+            for url, lastmod in all_urls:
+                results.append(URLInfo(
+                    input_url=input_url,
+                    url=url,
+                    last_modified=lastmod
+                ))
+        else:
+            results.append(URLInfo(
+                input_url=input_url,
+                url="",
+                last_modified=None
+            ))
+
+    return {"results": [r.model_dump() for r in results]}  # ✅ Fixes deprecation
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
