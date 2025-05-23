@@ -142,34 +142,39 @@ def get_all_sitemaps(base_url):
 @app.post("/sitemaps/csv", response_model=dict)
 async def get_sitemap_data_from_csv(file: UploadFile = File(...)):
     """
-    Processes an uploaded CSV file containing URLs, fetches sitemap data for each,
-    and appends only URLs with a 'last_modified' date to 'all_sitemaps.csv'
-    inside an 'output' folder.
+    Processes an uploaded CSV file containing URLs, fetches sitemap data for each.
+    It appends only URLs with a 'last_modified' date to 'all_sitemaps.csv'
+    and writes initial URLs that failed to yield any sitemap data with a
+    'last_modified' date to 'failed_urls.csv', both within an 'output' folder.
     """
     contents = await file.read()
     csv_text = contents.decode('utf-8')
     reader = csv.DictReader(io.StringIO(csv_text))
     
-    # Define the output directory and filename
+    # Define the output directory and filenames
     output_dir = "output"
-    output_filename = os.path.join(output_dir, "all_sitemaps.csv")
+    all_sitemaps_filename = os.path.join(output_dir, "all_sitemaps.csv")
+    failed_urls_filename = os.path.join(output_dir, "failed_urls.csv")
     
     # Create the output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Determine if the file exists and is empty to decide whether to write headers
-    file_exists = os.path.exists(output_filename)
-    
-    # Open the CSV file in append mode ('a')
-    with open(output_filename, 'a', newline='', encoding='utf-8') as outfile:
-        fieldnames = ["input_url", "url", "last_modified"]
-        writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-        
-        # Write header only if the file is new or currently empty
-        if not file_exists or os.stat(output_filename).st_size == 0:
-            writer.writeheader()
+    # List to store URLs that failed to produce valid sitemap entries
+    failed_urls_to_record = []
+    processed_sitemap_entries_count = 0
 
-        processed_entries_count = 0
+    # Determine if the all_sitemaps.csv file exists and is empty to decide whether to write headers
+    all_sitemaps_file_exists = os.path.exists(all_sitemaps_filename)
+    
+    # Open the all_sitemaps.csv file in append mode ('a')
+    with open(all_sitemaps_filename, 'a', newline='', encoding='utf-8') as all_sitemaps_outfile:
+        sitemap_fieldnames = ["input_url", "url", "last_modified"]
+        sitemap_writer = csv.DictWriter(all_sitemaps_outfile, fieldnames=sitemap_fieldnames)
+        
+        # Write header for all_sitemaps.csv only if file is new or currently empty
+        if not all_sitemaps_file_exists or os.stat(all_sitemaps_filename).st_size == 0:
+            sitemap_writer.writeheader()
+
         for row in reader:
             input_url = row.get("url") # Assuming the input CSV has a 'url' column
             if not input_url:
@@ -177,6 +182,10 @@ async def get_sitemap_data_from_csv(file: UploadFile = File(...)):
                 continue
             
             print(f"Processing input URL from CSV: {input_url}")
+            
+            # Flag to track if any valid sitemap entry was found for the current input_url
+            found_valid_sitemap_entry_for_this_url = False
+            
             all_urls_from_site = get_all_sitemaps(input_url)
             
             if all_urls_from_site:
@@ -188,15 +197,39 @@ async def get_sitemap_data_from_csv(file: UploadFile = File(...)):
                             url=url,
                             last_modified=lastmod
                         )
-                        writer.writerow(row_to_write.model_dump())
-                        processed_entries_count += 1
-                        print(f"  Appended: {url} (Last Modified: {lastmod})")
+                        sitemap_writer.writerow(row_to_write.model_dump())
+                        processed_sitemap_entries_count += 1
+                        found_valid_sitemap_entry_for_this_url = True
+                        print(f"  Appended to all_sitemaps.csv: {url} (Last Modified: {lastmod})")
                     else:
-                        print(f"  Skipped: {url} (No Last Modified Date Found)")
+                        print(f"  Skipped (no last_modified): {url}")
             else:
                 print(f"No sitemap URLs found for input: {input_url}")
+            
+            # If no valid sitemap entries were found for this input_url, record it as failed
+            if not found_valid_sitemap_entry_for_this_url:
+                failed_urls_to_record.append(input_url)
+                print(f"  Recorded as failed: {input_url}")
+
+    # Now, write the failed URLs to failed_urls.csv
+    failed_urls_file_exists = os.path.exists(failed_urls_filename)
+    with open(failed_urls_filename, 'a', newline='', encoding='utf-8') as failed_urls_outfile:
+        failed_writer = csv.writer(failed_urls_outfile)
+        
+        # Write header for failed_urls.csv only if file is new or currently empty
+        if not failed_urls_file_exists or os.stat(failed_urls_filename).st_size == 0:
+            failed_writer.writerow(["input_url"])
+        
+        for failed_url in failed_urls_to_record:
+            failed_writer.writerow([failed_url])
     
-    return {"message": f"Sitemap data processed and appended to {output_filename}. Total entries with last_modified date: {processed_entries_count}"}
+    return {
+        "message": (
+            f"Sitemap data processed. "
+            f"Total entries with last_modified date appended to '{all_sitemaps_filename}': {processed_sitemap_entries_count}. "
+            f"Initial URLs that yielded no valid sitemap entries written to '{failed_urls_filename}': {len(failed_urls_to_record)}."
+        )
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
